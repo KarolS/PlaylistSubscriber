@@ -3,8 +3,8 @@ PlaylistSubscriber
 
 Program for checking if new videos were added to given Youtube playlists.
 
-Prerequisites
-===========
+Compilation prerequisites
+=========================
 
 * GHC 7.6.* or higher
 
@@ -32,7 +32,7 @@ Usage
 * if you don't want to see the entries again, mark them as seen
 
 License
-======
+=======
 
 GPL v3. See the attached file.
 
