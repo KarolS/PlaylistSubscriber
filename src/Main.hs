@@ -17,7 +17,8 @@ playlistIdSet f = PersistentSet f Y.unPlaylistId Y.playListIdFromString
 
 getUnseenVideos :: [Y.VideoId] -> [Y.PlaylistId] -> IO [(Y.Playlist, [Y.Video])]
 getUnseenVideos seenVideoIds playlistIds = do
-	playlists <- catMaybes <$> mapM Y.getPlaylist playlistIds
+	cfg <- getConfig
+	playlists <- catMaybes <$> mapM (Y.getPlaylist cfg) playlistIds
 	let taggedVideos = map (\p -> (p, filter (\v -> not $ idOfVideo v `elem` seenVideoIds) $ Y.videosOfPlaylist p)) playlists
 	return $ filter (not . null . snd) taggedVideos
 

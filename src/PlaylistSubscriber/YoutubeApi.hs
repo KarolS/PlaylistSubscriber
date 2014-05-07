@@ -1,6 +1,8 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 module PlaylistSubscriber.YoutubeApi where
 
 import Control.Applicative
+import Control.Exception
 import Control.Monad
 import Data.Aeson as A
 import Data.List
@@ -8,7 +10,6 @@ import Data.Maybe
 import Network.HTTP.Conduit as C
 import System.Directory
 import System.FilePath.Posix ((</>))
-import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.HashMap.Strict as H
 import qualified Data.Text as T
@@ -31,14 +32,16 @@ data Playlist = Playlist {
 	videosOfPlaylist :: [Video]} deriving Show
 data FewVideos = FewVideos [Video] (Maybe PageToken)
 
+data Config = Config { apiKey :: String} deriving (Eq, Show, Read)
+
 emptyPlaylist :: Playlist
 emptyPlaylist = Playlist (PlaylistId "0") "<unknown playlist>" "<unknown channel>" []
 
 insertPageToken :: Maybe PageToken -> String
 insertPageToken maybeToken = maybe "" (("&pageToken=" ++) . unPageToken) maybeToken
 
-apiKey :: String
-apiKey = unsafePerformIO $ do 
+getConfig :: IO Config
+getConfig = do 
 	home <- getHomeDirectory
 	let apiKeyFile = home </> ".youtubeApiKey"
 	exists <- doesFileExist apiKeyFile
@@ -47,72 +50,77 @@ apiKey = unsafePerformIO $ do
 		putStrLn "Go to https://developers.google.com/youtube/registering_an_application and acquire an API key"
 		error "No API key found"
 	apiKeyFileContents <- readFile apiKeyFile
-	return $ head $ filter (not . null) $ lines apiKeyFileContents
+	return $ Config (head $ filter (not . null) $ lines apiKeyFileContents)
 
-playlistItemsApiUrl :: PlaylistId -> Maybe PageToken -> String
-playlistItemsApiUrl playlistId pageToken = 
+playlistItemsApiUrl :: Config -> PlaylistId -> Maybe PageToken -> String
+playlistItemsApiUrl cfg playlistId pageToken = 
 	"https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId="++
 	unPlaylistId playlistId ++
 	insertPageToken pageToken ++
-	"&maxResults=50&key=" ++ apiKey
+	"&maxResults=50&key=" ++ apiKey cfg
 
-playlistApiUrl :: PlaylistId -> String
-playlistApiUrl playlistId = 
+playlistApiUrl :: Config -> PlaylistId -> String
+playlistApiUrl cfg playlistId = 
 	"https://www.googleapis.com/youtube/v3/playlists?part=snippet&id="++
 	unPlaylistId playlistId ++
-	"&key=" ++ apiKey
+	"&key=" ++ apiKey cfg
 
-getPlaylistPart :: PlaylistId -> Maybe PageToken -> IO (Maybe PlaylistPart)
-getPlaylistPart playlistId pageToken = do
-	response <- C.simpleHttp $ playlistItemsApiUrl playlistId pageToken :: IO L.ByteString
-	case A.decode response of
-		Just o -> do
-			let snippets = jpathArray ["items", "snippet"] o :: [A.Value] 
-			let videos = catMaybes $ map (\s ->
-				let 	
-					maybeId = jsonGetString ["resourceId", "videoId"] s
-					maybePosition = jsonGetInteger ["position"] s
-					maybeTitle = jsonGetString ["title"] s
-				in 
-					Video <$>
-					(VideoId <$> maybeId) <*>
-					((+1) <$> maybePosition) <*>
-					maybeTitle
-				) snippets
-			return $ Just $ PlaylistPart videos (
-				PageToken <$> jsonGetString ["nextPageToken"] o
-				)
-		_ -> return Nothing
+getPlaylistPart :: Config -> PlaylistId -> Maybe PageToken -> IO (Maybe PlaylistPart)
+getPlaylistPart cfg playlistId pageToken = do
+	flip catch (\(_::SomeException) -> do
+		putStrLn ("Failed to get " ++ unPlaylistId playlistId)
+		return Nothing
+		) $ do
+			response <- C.simpleHttp $ playlistItemsApiUrl cfg playlistId pageToken :: IO L.ByteString
+			case A.decode response of
+				Just o -> do
+					let snippets = jpathArray ["items", "snippet"] o :: [A.Value] 
+					let videos = catMaybes $ map (\s ->
+						let 	
+							maybeId = jsonGetString ["resourceId", "videoId"] s
+							maybePosition = jsonGetInteger ["position"] s
+							maybeTitle = jsonGetString ["title"] s
+						in 
+							Video <$>
+							(VideoId <$> maybeId) <*>
+							((+1) <$> maybePosition) <*>
+							maybeTitle
+						) snippets
+					return $ Just $ PlaylistPart videos (
+						PageToken <$> jsonGetString ["nextPageToken"] o
+						)
+				_ -> return Nothing
 
-getPlaylistTitleAndOwner :: PlaylistId -> IO (String, String)
-getPlaylistTitleAndOwner playlistId = do
-	response <- C.simpleHttp $ playlistApiUrl playlistId :: IO L.ByteString
-	case A.decode response of
-		Just o -> 
-			let 
-				maybeTitle = jsonGetString ["items", "snippet", "title"] o
-				maybeOwner = jsonGetString ["items", "snippet", "channelTitle"] o
-			in
-				return (fromMaybe "<unknown playlist>" maybeTitle, fromMaybe "<unknown channel>" maybeOwner)
-		_ -> return ("<unknown playlist>", "<unknown channel>") 
+getPlaylistTitleAndOwner :: Config -> PlaylistId -> IO (String, String)
+getPlaylistTitleAndOwner cfg playlistId = do
+	flip catch (\(_::SomeException) -> return ("<unknown playlist>", "<unknown channel>")) $ do
+		response <- C.simpleHttp $ playlistApiUrl cfg playlistId :: IO L.ByteString
+		case A.decode response of
+			Just o -> 
+				let 
+					maybeTitle = jsonGetString ["items", "snippet", "title"] o
+					maybeOwner = jsonGetString ["items", "snippet", "channelTitle"] o
+				in
+					return (fromMaybe "<unknown playlist>" maybeTitle, fromMaybe "<unknown channel>" maybeOwner)
+			_ -> return ("<unknown playlist>", "<unknown channel>") 
 
 
-getPlaylist :: PlaylistId -> IO (Maybe Playlist)
-getPlaylist playlistId = do
+getPlaylist :: Config -> PlaylistId -> IO (Maybe Playlist)
+getPlaylist cfg playlistId = do
 	putStrLn $ "Loading playlist " ++ unPlaylistId playlistId
-	maybePage0 <- getPlaylistPart playlistId Nothing
+	maybePage0 <- getPlaylistPart cfg playlistId Nothing
 	case maybePage0 of
 		Nothing -> return Nothing
 		Just (PlaylistPart videos token) -> do
 			moreVideos <- getMore token
 			(title, owner) <-
-				getPlaylistTitleAndOwner playlistId
+				getPlaylistTitleAndOwner cfg playlistId
 			return $ Just $ Playlist playlistId title owner $ concat $ videos:moreVideos
 	where 
 		getMore :: Maybe PageToken -> IO [[Video]]
 		getMore Nothing = return []
 		getMore (Just token) = do
-			maybeNextPage <- getPlaylistPart playlistId (Just token)
+			maybeNextPage <- getPlaylistPart cfg playlistId (Just token)
 			case maybeNextPage of
 				Nothing -> return []
 				Just (PlaylistPart videos nextToken) -> (videos:) <$> getMore nextToken
