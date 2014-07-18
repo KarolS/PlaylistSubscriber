@@ -8,6 +8,7 @@ import Data.Aeson as A
 import Data.List
 import Data.Maybe
 import Network.HTTP.Conduit as C
+import Network.Connection(TLSSettings(TLSSettingsSimple))
 import System.Directory
 import System.FilePath.Posix ((</>))
 import qualified Data.ByteString.Lazy as L
@@ -22,17 +23,24 @@ newtype PageToken = PageToken { unPageToken :: String } deriving (Eq, Show)
 data Video = Video {
 	idOfVideo :: VideoId,
 	numberOfVideo :: Integer,
-	titleOfVideo :: String	
+	titleOfVideo :: String
 	} deriving Show
 data PlaylistPart = PlaylistPart [Video] (Maybe PageToken)
 data Playlist = Playlist {
 	idOfPlaylist :: PlaylistId,
-	titleOfPlaylist :: String, 
+	titleOfPlaylist :: String,
 	ownerOfPlaylist :: String,
 	videosOfPlaylist :: [Video]} deriving Show
 data FewVideos = FewVideos [Video] (Maybe PageToken)
 
-data Config = Config { apiKey :: String} deriving (Eq, Show, Read)
+data Config = Config { apiKey :: String, manager :: C.Manager }
+
+mySimpleHttp :: Config -> String -> IO L.ByteString
+mySimpleHttp cfg url = do
+	baseRequest <- C.parseUrl url
+	let request = baseRequest --{responseTimeout = Just 1500000}
+	res <- C.httpLbs request $ manager cfg
+	return $ C.responseBody res
 
 emptyPlaylist :: Playlist
 emptyPlaylist = Playlist (PlaylistId "0") "<unknown playlist>" "<unknown channel>" []
@@ -41,7 +49,7 @@ insertPageToken :: Maybe PageToken -> String
 insertPageToken maybeToken = maybe "" (("&pageToken=" ++) . unPageToken) maybeToken
 
 getConfig :: IO Config
-getConfig = do 
+getConfig = do
 	home <- getHomeDirectory
 	let apiKeyFile = home </> ".youtubeApiKey"
 	exists <- doesFileExist apiKeyFile
@@ -50,17 +58,19 @@ getConfig = do
 		putStrLn "Go to https://developers.google.com/youtube/registering_an_application and acquire an API key"
 		error "No API key found"
 	apiKeyFileContents <- readFile apiKeyFile
-	return $ Config (head $ filter (not . null) $ lines apiKeyFileContents)
+	let ak = (head $ filter (not . null) $ lines apiKeyFileContents)
+	mgr <- newManager $ C.mkManagerSettings (TLSSettingsSimple True False False) Nothing
+	return $ Config ak mgr
 
 playlistItemsApiUrl :: Config -> PlaylistId -> Maybe PageToken -> String
-playlistItemsApiUrl cfg playlistId pageToken = 
+playlistItemsApiUrl cfg playlistId pageToken =
 	"https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId="++
 	unPlaylistId playlistId ++
 	insertPageToken pageToken ++
 	"&maxResults=50&key=" ++ apiKey cfg
 
 playlistApiUrl :: Config -> PlaylistId -> String
-playlistApiUrl cfg playlistId = 
+playlistApiUrl cfg playlistId =
 	"https://www.googleapis.com/youtube/v3/playlists?part=snippet&id="++
 	unPlaylistId playlistId ++
 	"&key=" ++ apiKey cfg
@@ -68,19 +78,24 @@ playlistApiUrl cfg playlistId =
 getPlaylistPart :: Config -> PlaylistId -> Maybe PageToken -> IO (Maybe PlaylistPart)
 getPlaylistPart cfg playlistId pageToken = do
 	flip catch (\(_::SomeException) -> do
-		putStrLn ("Failed to get " ++ unPlaylistId playlistId)
+		putStrLn (
+			"Failed to get " ++
+			unPlaylistId playlistId ++
+			". Is it down? https://www.youtube.com/playlist?list=" ++
+			unPlaylistId playlistId )
 		return Nothing
 		) $ do
-			response <- C.simpleHttp $ playlistItemsApiUrl cfg playlistId pageToken :: IO L.ByteString
+			response <- mySimpleHttp cfg $
+				playlistItemsApiUrl cfg playlistId pageToken :: IO L.ByteString
 			case A.decode response of
 				Just o -> do
-					let snippets = jpathArray ["items", "snippet"] o :: [A.Value] 
+					let snippets = jpathArray ["items", "snippet"] o :: [A.Value]
 					let videos = catMaybes $ map (\s ->
-						let 	
+						let
 							maybeId = jsonGetString ["resourceId", "videoId"] s
 							maybePosition = jsonGetInteger ["position"] s
 							maybeTitle = jsonGetString ["title"] s
-						in 
+						in
 							Video <$>
 							(VideoId <$> maybeId) <*>
 							((+1) <$> maybePosition) <*>
@@ -94,15 +109,16 @@ getPlaylistPart cfg playlistId pageToken = do
 getPlaylistTitleAndOwner :: Config -> PlaylistId -> IO (String, String)
 getPlaylistTitleAndOwner cfg playlistId = do
 	flip catch (\(_::SomeException) -> return ("<unknown playlist>", "<unknown channel>")) $ do
-		response <- C.simpleHttp $ playlistApiUrl cfg playlistId :: IO L.ByteString
+		response <- mySimpleHttp cfg $
+			playlistApiUrl cfg playlistId :: IO L.ByteString
 		case A.decode response of
-			Just o -> 
-				let 
+			Just o ->
+				let
 					maybeTitle = jsonGetString ["items", "snippet", "title"] o
 					maybeOwner = jsonGetString ["items", "snippet", "channelTitle"] o
 				in
 					return (fromMaybe "<unknown playlist>" maybeTitle, fromMaybe "<unknown channel>" maybeOwner)
-			_ -> return ("<unknown playlist>", "<unknown channel>") 
+			_ -> return ("<unknown playlist>", "<unknown channel>")
 
 
 getPlaylist :: Config -> PlaylistId -> IO (Maybe Playlist)
@@ -116,7 +132,7 @@ getPlaylist cfg playlistId = do
 			(title, owner) <-
 				getPlaylistTitleAndOwner cfg playlistId
 			return $ Just $ Playlist playlistId title owner $ concat $ videos:moreVideos
-	where 
+	where
 		getMore :: Maybe PageToken -> IO [[Video]]
 		getMore Nothing = return []
 		getMore (Just token) = do
@@ -165,14 +181,15 @@ jsonGetStrings :: [String] -> A.Value -> [String]
 jsonGetStrings p j = jsonStringify <$> jpathArray p j
 
 playListIdFromString :: String -> PlaylistId
-playListIdFromString s 
+playListIdFromString s
 	| isPrefixOf "https://www.youtube.com/playlist?list=" s = playListIdFromString $ drop 38 s
 	| isPrefixOf "http://www.youtube.com/playlist?list=" s = playListIdFromString $ drop 37 s
-	| isPrefixOf "PL" s && length s > 16 = playListIdFromString $ drop 2 s
-	| otherwise = PlaylistId s
+	| isPrefixOf "PL" s && length s > 16 = PlaylistId s
+	| isPrefixOf "FL" s && length s > 16 = PlaylistId s
+	| otherwise = PlaylistId ("PL" ++ s)
 
 videoUrl :: Video -> String
 videoUrl v = "http://www.youtube.com/watch?v=" ++ unVideoId (idOfVideo v)
 
 playlistUrl :: Playlist -> String
-playlistUrl p = "http://www.youtube.com/playlist?list=PL" ++ unPlaylistId (idOfPlaylist p)
+playlistUrl p = "http://www.youtube.com/playlist?list=" ++ unPlaylistId (idOfPlaylist p)

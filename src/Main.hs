@@ -6,6 +6,7 @@ import PlaylistSubscriber.PersistentSet
 import Data.Maybe
 import Control.Applicative
 import Control.Monad
+import Network (withSocketsDo)
 import System.Directory
 import System.FilePath.Posix
 
@@ -25,7 +26,7 @@ getUnseenVideos seenVideoIds playlistIds = do
 yesOrNo :: String -> IO Bool
 yesOrNo query = do
 	putStrLn query
-	answer <- getLine 
+	answer <- getLine
 	case answer of
 		"y" -> return True
 		"Y" -> return True
@@ -38,7 +39,7 @@ yesOrNo query = do
 		_ -> putStrLn "Please answer yes or no." >> yesOrNo query
 
 main :: IO()
-main = do
+main = withSocketsDo $ do
 	home <- getHomeDirectory
 	let subscriptionsFile = home </> ".playlistSubscriptions"
 	exists <- doesFileExist subscriptionsFile
@@ -56,11 +57,10 @@ main = do
 		forM videos $ \v -> do
 			putStrLn $ show (Y.numberOfVideo v) ++ " " ++ Y.titleOfVideo v
 			putStrLn $ "    " ++ Y.videoUrl v
-	if (not $ null taggedVideos) 
+	if (not $ null taggedVideos)
 	then do
 		y <- yesOrNo "Mark as seen?"
 		when y $ do
 			putStrLn $ "Marking " ++ show (sum $ map (length . snd) taggedVideos) ++ " videos as seen"
 			savePersistentSet seenVideoIdSet (seenVideoIds ++  concatMap (fmap idOfVideo . snd) taggedVideos)
 	else putStrLn "No new videos"
-	return ()
