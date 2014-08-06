@@ -186,6 +186,7 @@ playListIdFromString s
 	| isPrefixOf "http://www.youtube.com/playlist?list=" s = playListIdFromString $ drop 37 s
 	| isPrefixOf "PL" s && length s > 16 = PlaylistId s
 	| isPrefixOf "FL" s && length s > 16 = PlaylistId s
+	| isPrefixOf "LL" s && length s > 16 = PlaylistId s
 	| otherwise = PlaylistId ("PL" ++ s)
 
 videoUrl :: Video -> String
